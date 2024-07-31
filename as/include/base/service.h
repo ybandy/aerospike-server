@@ -2,6 +2,7 @@
  * service.h
  *
  * Copyright (C) 2018 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -82,3 +83,5 @@ bool as_service_set_proto_fd_max(uint32_t val);
 void as_service_rearm(struct as_file_handle_s* fd_h);
 void as_service_enqueue_internal(struct as_transaction_s* tr);
 void as_service_enqueue_internal_keyd(struct as_transaction_s* tr);
+
+void as_abt_init(void);

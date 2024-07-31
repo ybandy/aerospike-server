@@ -82,6 +82,10 @@ INCLUDES += -I$(COMMON)/target/$(PLATFORM)/include
 INCLUDES += -I$(JANSSON)/src
 INCLUDES += -I$(JEMALLOC)/include
 
+ifneq ($(USE_ARGOBOTS),0)
+  INCLUDES += -I$(ARGOBOTS)/src/include
+endif
+
 OBJECTS = $(SOURCES:%.c=$(OBJECT_DIR)/%.o)
 DEPENDENCIES = $(OBJECTS:%.o=%.d)
 

@@ -2,6 +2,7 @@
  * cfg.c
  *
  * Copyright (C) 2008-2020 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -181,6 +182,10 @@ cfg_set_defaults()
 	c->transaction_retry_ms = 1000 + 2; // 1 second + epsilon, so default timeout happens first
 	c->work_directory = "/opt/aerospike";
 	c->debug_allocations = CF_ALLOC_DEBUG_NONE;
+	c->n_service_busy_polling_threshold = UINT64_MAX;
+	c->n_defrag_threads_per_device = 1;
+	c->n_io_uring_setup_entries = 128;
+	c->checkpoint_capacity = 128 * 1024;
 
 	// Network heartbeat defaults.
 	c->hb_config.mode = AS_HB_MODE_UNDEF;
@@ -263,8 +268,11 @@ typedef enum {
 	CASE_SERVICE_BATCH_INDEX_THREADS,
 	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE,
 	CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS,
+	CASE_SERVICE_CHECKPOINT_CAPACITY,
 	CASE_SERVICE_CLUSTER_NAME,
 	CASE_SERVICE_DEBUG_ALLOCATIONS,
+	CASE_SERVICE_DEFRAG_THREADS_PER_DEVICE,
+	CASE_SERVICE_DEFRAG_XSTREAMS,
 	CASE_SERVICE_DISABLE_UDF_EXECUTION,
 	CASE_SERVICE_ENABLE_BENCHMARKS_FABRIC,
 	CASE_SERVICE_ENABLE_HEALTH_CHECK,
@@ -275,6 +283,8 @@ typedef enum {
 	CASE_SERVICE_INDENT_ALLOCATIONS,
 	CASE_SERVICE_INFO_MAX_MS,
 	CASE_SERVICE_INFO_THREADS,
+	CASE_SERVICE_IO_URING_SETUP_ENTRIES,
+	CASE_SERVICE_IO_URING_SETUP_IOPOLL,
 	CASE_SERVICE_KEEP_CAPS_SSD_HEALTH,
 	CASE_SERVICE_LOG_LOCAL_TIME,
 	CASE_SERVICE_LOG_MILLIS,
@@ -296,7 +306,9 @@ typedef enum {
 	CASE_SERVICE_SECRETS_ADDRESS_PORT,
 	CASE_SERVICE_SECRETS_TLS_CONTEXT,
 	CASE_SERVICE_SECRETS_UDS_PATH,
+	CASE_SERVICE_SERVICE_BUSY_POLLING_THRESHOLD,
 	CASE_SERVICE_SERVICE_THREADS,
+	CASE_SERVICE_SERVICE_XSTREAMS,
 	CASE_SERVICE_SINDEX_BUILDER_THREADS,
 	CASE_SERVICE_SINDEX_GC_PERIOD,
 	CASE_SERVICE_STAY_QUIESCED,
@@ -527,6 +539,7 @@ typedef enum {
 	CASE_NAMESPACE_INDEX_TYPE_SHMEM,
 	CASE_NAMESPACE_INDEX_TYPE_PMEM,
 	CASE_NAMESPACE_INDEX_TYPE_FLASH,
+	CASE_NAMESPACE_INDEX_TYPE_XLMEM,
 
 	// Namespace sindex-type options (value tokens):
 	CASE_NAMESPACE_SINDEX_TYPE_SHMEM,
@@ -547,6 +560,11 @@ typedef enum {
 	CASE_NAMESPACE_INDEX_TYPE_FLASH_MOUNT,
 	CASE_NAMESPACE_INDEX_TYPE_FLASH_MOUNTS_HIGH_WATER_PCT,
 	CASE_NAMESPACE_INDEX_TYPE_FLASH_MOUNTS_SIZE_LIMIT,
+
+	// Namespace index-type xlmem options:
+	CASE_NAMESPACE_INDEX_TYPE_XLMEM_NODE_MASK,
+	CASE_NAMESPACE_INDEX_TYPE_XLMEM_SIZE_LIMIT,
+	CASE_NAMESPACE_INDEX_TYPE_XLMEM_LATENCY_NS,
 
 	// Namespace sindex-type pmem options:
 	CASE_NAMESPACE_SINDEX_TYPE_PMEM_MOUNT,
@@ -777,9 +795,12 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "batch-index-threads",			CASE_SERVICE_BATCH_INDEX_THREADS },
 		{ "batch-max-buffers-per-queue",	CASE_SERVICE_BATCH_MAX_BUFFERS_PER_QUEUE },
 		{ "batch-max-unused-buffers",		CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS },
+		{ "checkpoint-capacity",				CASE_SERVICE_CHECKPOINT_CAPACITY },
 		{ "cluster-name",					CASE_SERVICE_CLUSTER_NAME },
 		{ "debug-allocations",				CASE_SERVICE_DEBUG_ALLOCATIONS },
 		{ "disable-udf-execution",			CASE_SERVICE_DISABLE_UDF_EXECUTION },
+		{ "defrag-threads-per-device",				CASE_SERVICE_DEFRAG_THREADS_PER_DEVICE },
+		{ "defrag-xstreams",				CASE_SERVICE_DEFRAG_XSTREAMS },
 		{ "enable-benchmarks-fabric",		CASE_SERVICE_ENABLE_BENCHMARKS_FABRIC },
 		{ "enable-health-check",			CASE_SERVICE_ENABLE_HEALTH_CHECK },
 		{ "enable-hist-info",				CASE_SERVICE_ENABLE_HIST_INFO },
@@ -789,6 +810,8 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "indent-allocations",				CASE_SERVICE_INDENT_ALLOCATIONS },
 		{ "info-max-ms",					CASE_SERVICE_INFO_MAX_MS },
 		{ "info-threads",					CASE_SERVICE_INFO_THREADS },
+		{ "io-uring-setup-entries",				CASE_SERVICE_IO_URING_SETUP_ENTRIES },
+		{ "io-uring-setup-iopoll",				CASE_SERVICE_IO_URING_SETUP_IOPOLL },
 		{ "keep-caps-ssd-health",			CASE_SERVICE_KEEP_CAPS_SSD_HEALTH },
 		{ "log-local-time",					CASE_SERVICE_LOG_LOCAL_TIME },
 		{ "log-millis",						CASE_SERVICE_LOG_MILLIS},
@@ -810,7 +833,9 @@ const cfg_opt SERVICE_OPTS[] = {
 		{ "secrets-address-port",			CASE_SERVICE_SECRETS_ADDRESS_PORT },
 		{ "secrets-tls-context",			CASE_SERVICE_SECRETS_TLS_CONTEXT },
 		{ "secrets-uds-path",				CASE_SERVICE_SECRETS_UDS_PATH },
+		{ "service-busy-polling-throughput",			CASE_SERVICE_SERVICE_BUSY_POLLING_THRESHOLD },
 		{ "service-threads",				CASE_SERVICE_SERVICE_THREADS },
+		{ "service-xstreams",				CASE_SERVICE_SERVICE_XSTREAMS },
 		{ "sindex-builder-threads",			CASE_SERVICE_SINDEX_BUILDER_THREADS },
 		{ "sindex-gc-period",				CASE_SERVICE_SINDEX_GC_PERIOD },
 		{ "stay-quiesced",					CASE_SERVICE_STAY_QUIESCED },
@@ -1069,7 +1094,8 @@ const cfg_opt NAMESPACE_WRITE_COMMIT_OPTS[] = {
 const cfg_opt NAMESPACE_INDEX_TYPE_OPTS[] = {
 		{ "shmem",							CASE_NAMESPACE_INDEX_TYPE_SHMEM },
 		{ "pmem",							CASE_NAMESPACE_INDEX_TYPE_PMEM },
-		{ "flash",							CASE_NAMESPACE_INDEX_TYPE_FLASH }
+		{ "flash",							CASE_NAMESPACE_INDEX_TYPE_FLASH },
+		{ "xlmem",							CASE_NAMESPACE_INDEX_TYPE_XLMEM }
 };
 
 const cfg_opt NAMESPACE_SINDEX_TYPE_OPTS[] = {
@@ -1095,6 +1121,13 @@ const cfg_opt NAMESPACE_INDEX_TYPE_FLASH_OPTS[] = {
 		{ "mount",							CASE_NAMESPACE_INDEX_TYPE_FLASH_MOUNT },
 		{ "mounts-high-water-pct",			CASE_NAMESPACE_INDEX_TYPE_FLASH_MOUNTS_HIGH_WATER_PCT },
 		{ "mounts-size-limit",				CASE_NAMESPACE_INDEX_TYPE_FLASH_MOUNTS_SIZE_LIMIT },
+		{ "}",								CASE_CONTEXT_END }
+};
+
+const cfg_opt NAMESPACE_INDEX_TYPE_XLMEM_OPTS[] = {
+		{ "node-mask",							CASE_NAMESPACE_INDEX_TYPE_XLMEM_NODE_MASK },
+		{ "size-limit",				CASE_NAMESPACE_INDEX_TYPE_XLMEM_SIZE_LIMIT },
+		{ "latency-ns",				CASE_NAMESPACE_INDEX_TYPE_XLMEM_LATENCY_NS },
 		{ "}",								CASE_CONTEXT_END }
 };
 
@@ -1353,6 +1386,7 @@ const int NUM_NAMESPACE_SINDEX_TYPE_OPTS			= sizeof(NAMESPACE_SINDEX_TYPE_OPTS) 
 const int NUM_NAMESPACE_STORAGE_OPTS				= sizeof(NAMESPACE_STORAGE_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_INDEX_TYPE_PMEM_OPTS		= sizeof(NAMESPACE_INDEX_TYPE_PMEM_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_INDEX_TYPE_FLASH_OPTS		= sizeof(NAMESPACE_INDEX_TYPE_FLASH_OPTS) / sizeof(cfg_opt);
+const int NUM_NAMESPACE_INDEX_TYPE_XLMEM_OPTS		= sizeof(NAMESPACE_INDEX_TYPE_XLMEM_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SINDEX_TYPE_PMEM_OPTS		= sizeof(NAMESPACE_SINDEX_TYPE_PMEM_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_SINDEX_TYPE_FLASH_OPTS		= sizeof(NAMESPACE_SINDEX_TYPE_FLASH_OPTS) / sizeof(cfg_opt);
 const int NUM_NAMESPACE_STORAGE_PMEM_OPTS			= sizeof(NAMESPACE_STORAGE_PMEM_OPTS) / sizeof(cfg_opt);
@@ -1396,7 +1430,7 @@ typedef enum {
 	SERVICE,
 	LOGGING, LOGGING_CONTEXT, LOGGING_SYSLOG,
 	NETWORK, NETWORK_SERVICE, NETWORK_HEARTBEAT, NETWORK_FABRIC, NETWORK_INFO, NETWORK_TLS,
-	NAMESPACE, NAMESPACE_INDEX_TYPE_PMEM, NAMESPACE_INDEX_TYPE_FLASH, NAMESPACE_SINDEX_TYPE_PMEM, NAMESPACE_SINDEX_TYPE_FLASH, NAMESPACE_STORAGE_PMEM, NAMESPACE_STORAGE_DEVICE, NAMESPACE_SET, NAMESPACE_GEO2DSPHERE_WITHIN,
+	NAMESPACE, NAMESPACE_INDEX_TYPE_PMEM, NAMESPACE_INDEX_TYPE_FLASH, NAMESPACE_INDEX_TYPE_XLMEM, NAMESPACE_SINDEX_TYPE_PMEM, NAMESPACE_SINDEX_TYPE_FLASH, NAMESPACE_STORAGE_PMEM, NAMESPACE_STORAGE_DEVICE, NAMESPACE_SET, NAMESPACE_GEO2DSPHERE_WITHIN,
 	MOD_LUA,
 	SECURITY, SECURITY_LDAP, SECURITY_LOG,
 	XDR, XDR_DC, XDR_DC_NAMESPACE,
@@ -1410,7 +1444,7 @@ const char* CFG_PARSER_STATES[] = {
 		"SERVICE",
 		"LOGGING", "LOGGING_CONTEXT", "LOGGING_SYSLOG",
 		"NETWORK", "NETWORK_SERVICE", "NETWORK_HEARTBEAT", "NETWORK_FABRIC", "NETWORK_INFO", "NETWORK_TLS",
-		"NAMESPACE", "NAMESPACE_INDEX_TYPE_PMEM", "NAMESPACE_INDEX_TYPE_SSD", "NAMESPACE_SINDEX_TYPE_PMEM", "NAMESPACE_SINDEX_TYPE_FLASH", "NAMESPACE_STORAGE_PMEM", "NAMESPACE_STORAGE_DEVICE", "NAMESPACE_SET", "NAMESPACE_GEO2DSPHERE_WITHIN",
+		"NAMESPACE", "NAMESPACE_INDEX_TYPE_PMEM", "NAMESPACE_INDEX_TYPE_SSD", "NAMESPACE_INDEX_TYPE_XLMEM", "NAMESPACE_SINDEX_TYPE_PMEM", "NAMESPACE_SINDEX_TYPE_FLASH", "NAMESPACE_STORAGE_PMEM", "NAMESPACE_STORAGE_DEVICE", "NAMESPACE_SET", "NAMESPACE_GEO2DSPHERE_WITHIN",
 		"MOD_LUA",
 		"SECURITY", "SECURITY_LDAP", "SECURITY_LOG",
 		"XDR", "XDR_DC", "XDR_DC_NAMESPACE"
@@ -2088,6 +2122,9 @@ as_config_init(const char* config_file)
 			case CASE_SERVICE_BATCH_MAX_UNUSED_BUFFERS:
 				c->batch_max_unused_buffers = cfg_u32_no_checks(&line);
 				break;
+			case CASE_SERVICE_CHECKPOINT_CAPACITY:
+				c->checkpoint_capacity = cfg_u64_no_checks(&line);
+				break;
 			case CASE_SERVICE_CLUSTER_NAME:
 				cfg_set_cluster_name(line.val_tok_1);
 				break;
@@ -2110,6 +2147,12 @@ as_config_init(const char* config_file)
 					cfg_unknown_val_tok_1(&line);
 					break;
 				}
+				break;
+			case CASE_SERVICE_DEFRAG_THREADS_PER_DEVICE:
+				c->n_defrag_threads_per_device = cfg_u32(&line, 1, MAX_SERVICE_THREADS);
+				break;
+			case CASE_SERVICE_DEFRAG_XSTREAMS:
+				c->n_defrag_xstreams = cfg_u32(&line, 0, 1024);
 				break;
 			case CASE_SERVICE_DISABLE_UDF_EXECUTION:
 				c->udf_execution_disabled = cfg_bool(&line);
@@ -2148,6 +2191,12 @@ as_config_init(const char* config_file)
 				break;
 			case CASE_SERVICE_INFO_THREADS:
 				c->n_info_threads = cfg_u32(&line, 1, MAX_INFO_THREADS);
+				break;
+			case CASE_SERVICE_IO_URING_SETUP_ENTRIES:
+				c->n_io_uring_setup_entries = cfg_u32_no_checks(&line);
+				break;
+			case CASE_SERVICE_IO_URING_SETUP_IOPOLL:
+				c->io_uring_setup_iopoll = cfg_bool(&line);
 				break;
 			case CASE_SERVICE_KEEP_CAPS_SSD_HEALTH:
 				cfg_keep_cap(cfg_bool(&line), &c->keep_caps_ssd_health, CAP_SYS_ADMIN);
@@ -2216,8 +2265,14 @@ as_config_init(const char* config_file)
 				cfg_enterprise_only(&line);
 				g_secrets_cfg.uds_path = cfg_strdup_no_checks(&line);
 				break;
+			case CASE_SERVICE_SERVICE_BUSY_POLLING_THRESHOLD:
+				c->n_service_busy_polling_threshold = cfg_u64_no_checks(&line);
+				break;
 			case CASE_SERVICE_SERVICE_THREADS:
 				c->n_service_threads = cfg_u32(&line, 1, MAX_SERVICE_THREADS);
+				break;
+			case CASE_SERVICE_SERVICE_XSTREAMS:
+				c->n_service_xstreams = cfg_u32(&line, 1, 1024);
 				break;
 			case CASE_SERVICE_SINDEX_BUILDER_THREADS:
 				c->sindex_builder_threads = cfg_u32(&line, 1, 32);
@@ -2961,18 +3016,23 @@ as_config_init(const char* config_file)
 				cfg_begin_context(&state, NAMESPACE_GEO2DSPHERE_WITHIN);
 				break;
 			case CASE_NAMESPACE_INDEX_TYPE_BEGIN:
-				cfg_enterprise_only(&line);
 				switch (cfg_find_tok(line.val_tok_1, NAMESPACE_INDEX_TYPE_OPTS, NUM_NAMESPACE_INDEX_TYPE_OPTS)) {
 				case CASE_NAMESPACE_INDEX_TYPE_SHMEM:
 					ns->pi_xmem_type = CF_XMEM_TYPE_SHMEM;
 					break;
 				case CASE_NAMESPACE_INDEX_TYPE_PMEM:
+					cfg_enterprise_only(&line);
 					ns->pi_xmem_type = CF_XMEM_TYPE_PMEM;
 					cfg_begin_context(&state, NAMESPACE_INDEX_TYPE_PMEM);
 					break;
 				case CASE_NAMESPACE_INDEX_TYPE_FLASH:
+					cfg_enterprise_only(&line);
 					ns->pi_xmem_type = CF_XMEM_TYPE_FLASH;
 					cfg_begin_context(&state, NAMESPACE_INDEX_TYPE_FLASH);
+					break;
+				case CASE_NAMESPACE_INDEX_TYPE_XLMEM:
+					ns->pi_xmem_type = CF_XMEM_TYPE_XLMEM;
+					cfg_begin_context(&state, NAMESPACE_INDEX_TYPE_XLMEM);
 					break;
 				case CASE_NOT_FOUND:
 				default:
@@ -3133,6 +3193,33 @@ as_config_init(const char* config_file)
 				cfg_end_context(&state);
 				// TODO - main() doesn't yet support initialization as root.
 				cf_page_cache_dirty_limits();
+				break;
+			case CASE_NOT_FOUND:
+			default:
+				cfg_unknown_name_tok(&line);
+				break;
+			}
+			break;
+
+		//----------------------------------------
+		// Parse namespace::index-type xlmem context items.
+		//
+		case NAMESPACE_INDEX_TYPE_XLMEM:
+			switch (cfg_find_tok(line.name_tok, NAMESPACE_INDEX_TYPE_XLMEM_OPTS, NUM_NAMESPACE_INDEX_TYPE_XLMEM_OPTS)) {
+			case CASE_NAMESPACE_INDEX_TYPE_XLMEM_NODE_MASK:
+				ns->pi_nodemask = cfg_u64(&line, 1, UINT64_MAX);
+				break;
+			case CASE_NAMESPACE_INDEX_TYPE_XLMEM_SIZE_LIMIT:
+				ns->pi_mounts_size_limit = cfg_u64(&line, 1024UL * 1024UL * 1024UL, UINT64_MAX);
+				break;
+			case CASE_NAMESPACE_INDEX_TYPE_XLMEM_LATENCY_NS:
+				ns->pi_xmem_latency_ns = cfg_u32(&line, 0, 1000 * 1000 * 1000);
+				break;
+			case CASE_CONTEXT_END:
+				if (ns->pi_mounts_size_limit == 0) {
+					cf_crash_nostack(AS_CFG, "{%s} must configure 'size-limit'", ns->name);
+				}
+				cfg_end_context(&state);
 				break;
 			case CASE_NOT_FOUND:
 			default:
@@ -4019,6 +4106,10 @@ as_config_post_process(as_config* c, const char* config_file)
 	if (c->n_service_threads == 0) {
 		c->n_service_threads = c->n_namespaces_not_inlined != 0 ?
 				n_cpus * 5 : n_cpus;
+	}
+
+	if (c->n_service_xstreams == 0) {
+		c->n_service_xstreams = n_cpus;
 	}
 
 	// Setup performance metrics histograms.

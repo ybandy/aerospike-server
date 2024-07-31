@@ -2,6 +2,7 @@
  * index.c
  *
  * Copyright (C) 2012-2021 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -25,6 +26,7 @@
 //
 
 #include "base/index.h"
+#include "base/checkpoint.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -615,7 +617,11 @@ as_index_sprig_get_insert_vlock(as_index_sprig* isprig, uint8_t tree_id,
 
 			as_arch_prefetch_nt(t);
 
-			if ((cmp = cf_digest_compare(keyd, &t->keyd)) == 0) {
+			record_checkpoint(index_insert_compare_begin);
+			cmp = cf_digest_compare(keyd, &t->keyd);
+			record_checkpoint(index_insert_compare_end);
+
+			if (cmp == 0) {
 				// The element already exists, simply return it.
 
 				index_ref->r = t;
@@ -851,7 +857,9 @@ as_index_sprig_search_lockless(as_index_sprig* isprig, const cf_digest* keyd,
 
 		as_arch_prefetch_nt(r);
 
+		record_checkpoint(index_search_compare_begin);
 		int cmp = cf_digest_compare(keyd, &r->keyd);
+		record_checkpoint(index_search_compare_end);
 
 		if (cmp == 0) {
 			if (ret_h != NULL) {

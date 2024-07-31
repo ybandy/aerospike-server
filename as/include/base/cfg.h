@@ -2,6 +2,7 @@
  * cfg.h
  *
  * Copyright (C) 2008-2016 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -116,6 +117,8 @@ typedef struct as_config_s {
 	bool			run_as_daemon;
 	bool			salt_allocations; // initialize with junk - for internal use only
 	uint32_t		n_service_threads;
+	uint32_t		n_service_xstreams;
+	uint64_t		n_service_busy_polling_threshold;
 	uint32_t		sindex_builder_threads; // secondary index builder thread pool size
 	uint32_t		sindex_gc_period; // same as nsup_period for sindex gc
 	bool			stay_quiesced; // enterprise-only
@@ -188,6 +191,14 @@ typedef struct as_config_s {
 
 	uint32_t		n_tls_specs;
 	cf_tls_spec		tls_specs[MAX_TLS_SPECS];
+
+	uint32_t		n_defrag_threads_per_device;
+	uint32_t		n_defrag_xstreams;
+
+	uint32_t		n_io_uring_setup_entries;
+	bool			io_uring_setup_iopoll;
+
+	uint64_t checkpoint_capacity;
 
 
 	//======================================================

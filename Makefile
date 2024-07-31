@@ -40,6 +40,10 @@ UNAME=$(shell uname)
 # Common variable definitions:
 include make_in/Makefile.vars
 
+ifeq ($(USE_MEMCHECK),1)
+  MEMCHECK = valgrind --tool=memcheck --error-limit=no --soname-synonyms=somalloc=nouserintercepts --
+endif
+
 .PHONY: all server
 all server: aslibs
 	$(MAKE) -C as OS=$(OS)
@@ -49,7 +53,11 @@ lib: aslibs
 	$(MAKE) -C as $@ STATIC_LIB=1 OS=$(OS)
 
 .PHONY: aslibs
-aslibs: targetdirs version $(JANSSON)/Makefile $(JEMALLOC)/Makefile $(LUAJIT)/src/luaconf.h s2lib
+aslibs: targetdirs version $(JANSSON)/Makefile $(JEMALLOC)/Makefile $(LUAJIT)/src/luaconf.h s2lib $(ARGOBOTS)/Makefile $(LIBURING)/config-host.h
+ifneq ($(USE_ARGOBOTS),0)
+	$(MAKE) -C $(ARGOBOTS)
+	$(MAKE) -C $(LIBURING)
+endif
 ifeq ($(USE_LUAJIT),1)
 	$(MAKE) -C $(LUAJIT) Q= TARGET_SONAME=libluajit.so CCDEBUG=-g
 endif
@@ -106,7 +114,7 @@ start:
 	@echo "Running the Aerospike Server locally..."
 	@PIDFILE=run/asd.pid ; if [ -f $$PIDFILE ]; then echo "Aerospike already running?  Please do \"make stop\" first."; exit -1; fi
 	@nohup ./modules/telemetry/telemetry.py as/etc/telemetry_dev.conf > /dev/null 2>&1 &
-	$(BIN_DIR)/asd --config-file as/etc/aerospike_dev.conf
+	$(MEMCHECK) $(BIN_DIR)/asd --config-file as/etc/aerospike_dev.conf
 
 stop:
 	@echo "Stopping the local Aerospike Server..."
@@ -136,6 +144,13 @@ cleanmodules:
 	if [ -e "$(LUAJIT)/Makefile" ]; then \
 		$(MAKE) -C $(LUAJIT) clean; \
 	fi
+	if [ -e "$(ARGOBOTS)/Makefile" ]; then \
+		$(MAKE) -C $(ARGOBOTS) clean; \
+		$(MAKE) -C $(ARGOBOTS) distclean; \
+	fi
+	if [ -e "$(LIBURING)/config-host.h" ]; then \
+		$(MAKE) -C $(LIBURING) clean; \
+	fi
 	$(MAKE) -C $(MOD_LUA) COMMON=$(COMMON) USE_LUAJIT=$(USE_LUAJIT) LUAJIT=$(LUAJIT) clean
 	$(RM) -rf $(ABSL)/build $(ABSL)/installation # ABSL default clean leaves files in build directory
 	$(RM) -rf $(S2)/build # S2 default clean leaves files in build directory
@@ -159,6 +174,8 @@ cleangit:
 	cd $(JANSSON); $(GIT_CLEAN)
 	cd $(JEMALLOC); $(GIT_CLEAN)
 	cd $(LUAJIT); $(GIT_CLEAN)
+	cd $(ARGOBOTS); $(GIT_CLEAN)
+	cd $(LIBURING); $(GIT_CLEAN)
 	cd $(MOD_LUA); $(GIT_CLEAN)
 	cd $(S2); $(GIT_CLEAN)
 	$(GIT_CLEAN)
@@ -187,6 +204,15 @@ $(JEMALLOC)/configure:
 
 $(JEMALLOC)/Makefile: $(JEMALLOC)/configure
 	cd $(JEMALLOC) && ./configure $(JEM_CONFIG_OPT)
+
+$(ARGOBOTS)/configure:
+	cd $(ARGOBOTS) && ./autogen.sh
+
+$(ARGOBOTS)/Makefile: $(ARGOBOTS)/configure
+	cd $(ARGOBOTS) && ./configure --enable-debug=yes --enable-perf-opt --enable-affinity
+
+$(LIBURING)/config-host.h:
+	cd $(LIBURING) && ./configure
 
 .PHONY: source
 source: src

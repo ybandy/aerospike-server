@@ -2,6 +2,7 @@
  * datamodel.h
  *
  * Copyright (C) 2008-2022 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -818,6 +819,8 @@ typedef struct as_namespace_s {
 	uint32_t		n_pi_xmem_mounts; // indirect config
 	uint32_t		pi_mounts_hwm_pct;
 	uint64_t		pi_mounts_size_limit;
+	uint64_t		pi_nodemask;
+	uint32_t		pi_xmem_latency_ns;
 
 	const char*		si_xmem_mounts[CF_XMEM_MAX_MOUNTS];
 	uint32_t		n_si_xmem_mounts; // indirect config

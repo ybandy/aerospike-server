@@ -2,6 +2,7 @@
  * xmem.h
  *
  * Copyright (C) 2018 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -34,6 +35,8 @@ typedef enum {
 	CF_XMEM_TYPE_SHMEM = 0,
 	CF_XMEM_TYPE_PMEM,
 	CF_XMEM_TYPE_FLASH,
+
+	CF_XMEM_TYPE_XLMEM,
 
 	CF_NUM_XMEM_TYPES
 } cf_xmem_type;

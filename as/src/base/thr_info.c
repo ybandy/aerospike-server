@@ -2,6 +2,7 @@
  * thr_info.c
  *
  * Copyright (C) 2008-2022 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -65,6 +66,7 @@
 
 #include "base/batch.h"
 #include "base/cfg.h"
+#include "base/checkpoint.h"
 #include "base/cfg_info.h"
 #include "base/datamodel.h"
 #include "base/features.h"
@@ -204,6 +206,8 @@ static void append_sec_err_str(cf_dyn_buf* db, uint32_t result, as_sec_perm cmd_
 static int dyn_best_practices(char* name, cf_dyn_buf* db);
 static int dyn_bins(char* name, cf_dyn_buf* db);
 static int tree_bins(char* name, char* subtree, cf_dyn_buf* db);
+static int cmd_checkpoint_trace_dump(char* name, char* params, cf_dyn_buf* db);
+static int cmd_checkpoint_trace_reset(char* name, char* params, cf_dyn_buf* db);
 static int dyn_cluster_name(char* name, cf_dyn_buf* db);
 static int cmd_cluster_stable(char* name, char* params, cf_dyn_buf* db);
 static int cmd_debug_record(char* name, char* params, cf_dyn_buf* db);
@@ -456,6 +460,8 @@ as_info_init()
 	info_set_tree("sets", tree_sets);                                           // Returns set statistics for all or a particular set.
 
 	// Define commands.
+	info_set_command("checkpoint-trace-dump", cmd_checkpoint_trace_dump, PERM_NONE);
+	info_set_command("checkpoint-trace-reset", cmd_checkpoint_trace_reset, PERM_NONE);
 	info_set_command("cluster-stable", cmd_cluster_stable, PERM_NONE);          // Returns cluster key if cluster is stable.
 	info_set_command("config-get", as_cfg_info_cmd_config_get, PERM_NONE);      // Returns running config for specified context.
 	info_set_command("config-set", as_cfg_info_cmd_config_set, PERM_SET_CONFIG); // Set a configuration parameter at run time, configuration parameter must be dynamic.
@@ -1289,6 +1295,45 @@ tree_bins(char* name, char* subtree, cf_dyn_buf* db)
 		as_namespace_get_bins_info(ns, db, false);
 	}
 
+	return 0;
+}
+
+static int
+cmd_checkpoint_trace_dump(char* name, char* params, cf_dyn_buf* db)
+{
+	cf_debug(AS_INFO, "%s command received: params %s", name, params);
+
+	char param_str[100];
+	int param_str_len = sizeof(param_str);
+	char* file = NULL;
+
+	param_str[0] = '\0';
+	if (!as_info_parameter_get(params, "file", param_str, &param_str_len)) {
+		file = cf_strdup(param_str);
+	}
+
+	FILE *f = fopen(file, "a");
+	if (f) {
+		checkpoint_trace_dump(f);
+		fclose(f);
+	}
+
+	if (file) {
+		cf_free(file);
+	}
+
+	cf_dyn_buf_append_string(db, "ok");
+	return 0;
+}
+
+static int
+cmd_checkpoint_trace_reset(char* name, char* params, cf_dyn_buf* db)
+{
+	cf_debug(AS_INFO, "%s command received: params %s", name, params);
+
+	checkpoint_trace_reset();
+
+	cf_dyn_buf_append_string(db, "ok");
 	return 0;
 }
 

@@ -21,6 +21,8 @@ LIBRARIES += -lcrypto
 
 LIBRARIES += -lpthread -lrt -ldl -lz -lm
 
+LIBRARIES += -lnuma
+
 # Location of source files being compiled:
 #   "" (the default) means "src".  Automatically set to "../m4/" during non-zero macro expansion build phases.
 SRCDIR =
@@ -96,6 +98,14 @@ endif
 ifeq ($(shell $(DEPTH)/build/versioncheck '$(CC_VERSION)' 9.0.0), 1)
   # Disable compilation failure due to warnings about possibly unaligned pointers into packed structs.
   COMMON_CFLAGS += -Wno-address-of-packed-member
+endif
+
+ifneq ($(USE_ARGOBOTS),0)
+  COMMON_CFLAGS += -DUSE_ARGOBOTS
+endif
+
+ifneq ($(USE_CHECKPOINT),0)
+  COMMON_CFLAGS += -DUSE_CHECKPOINT
 endif
 
 CFLAGS = $(COMMON_CFLAGS) -DMARCH_$(ARCH)

@@ -2,6 +2,7 @@
  * cf_mutex.c
  *
  * Copyright (C) 2017-2022 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -39,6 +40,10 @@
 
 #include "log.h"
 
+#ifdef USE_ARGOBOTS
+#include "abt.h"
+#endif
+
 
 //==========================================================
 // Typedefs & constants.
@@ -73,6 +78,19 @@ cf_mutex_lock(cf_mutex* m)
 	if (likely(as_cas_acq((uint32_t*)m, &zero, 1))) {
 		return; // was not locked
 	}
+
+#ifdef USE_ARGOBOTS
+	{
+		ABT_thread self;
+
+		if (ABT_thread_self(&self) == ABT_SUCCESS) {
+			while (!cf_mutex_trylock(m)) {
+				ABT_thread_yield();
+			}
+			return;
+		}
+	}
+#endif
 
 	if (as_load_rlx(&m->u32) == 2) {
 		sys_futex(m, FUTEX_WAIT_PRIVATE, 2);

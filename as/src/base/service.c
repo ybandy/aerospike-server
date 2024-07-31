@@ -2,6 +2,7 @@
  * service.c
  *
  * Copyright (C) 2018-2020 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -53,6 +54,7 @@
 
 #include "base/batch.h"
 #include "base/cfg.h"
+#include "base/checkpoint.h"
 #include "base/datamodel.h"
 #include "base/proto.h"
 #include "base/security.h"
@@ -61,6 +63,12 @@
 #include "base/thr_tsvc.h"
 #include "base/transaction.h"
 #include "fabric/partition.h"
+
+#ifdef USE_ARGOBOTS
+#include "storage/drv_ssd.h"
+#include "aerospike/as_monitor.h"
+#include "abt.h"
+#endif
 
 #include "warnings.h"
 
@@ -79,7 +87,9 @@ typedef struct thread_ctx_s {
 	cf_mutex* lock;
 	cf_poll poll;
 	cf_epoll_queue trans_q;
-} thread_ctx;
+	uint32_t sid;
+	uint64_t n_busy_polling;
+} thread_ctx __attribute__((__aligned__(64)));
 
 
 //==========================================================
@@ -153,6 +163,212 @@ rearm(as_file_handle* fd_h, uint32_t events)
 			events | EPOLLONESHOT | EPOLLRDHUP, fd_h);
 }
 
+#ifdef USE_ARGOBOTS
+
+static as_monitor run_service_monitor;
+
+static void run_service_thread(void *udata)
+{
+	thread_ctx *ctx = udata;
+	uint32_t sid = ctx->sid;
+
+	as_monitor_wait(&run_service_monitor);
+
+	cf_detail(AS_SERVICE, "starting sid %u ctx %p", sid, ctx);
+
+	if (as_config_is_cpu_pinned()) {
+		ctx->i_cpu = (cf_topo_cpu_index)(sid % cf_topo_count_cpus());
+	}
+
+	ctx->lock = &g_thread_locks[sid];
+	cf_poll_create(&ctx->poll);
+	cf_epoll_queue_init(&ctx->trans_q, AS_TRANSACTION_HEAD_SIZE, 64);
+	ctx->n_busy_polling = 0;
+
+	cf_mutex_lock(&g_thread_locks[sid]);
+
+	g_thread_ctxs[sid] = ctx;
+
+	cf_mutex_unlock(&g_thread_locks[sid]);
+
+	run_service(ctx);
+}
+
+static void run_defrag_thread(void *udata)
+{
+	drv_ssd *ssd = udata;
+
+	as_monitor_wait(&ssd->run_defrag_monitor);
+	run_defrag(ssd);
+}
+
+static void *run_threads(void *arg __attribute__((unused)))
+{
+	ABT_xstream *service_xstreams = cf_malloc(sizeof(ABT_xstream) * g_config.n_service_xstreams);
+	ABT_xstream *defrag_xstreams = cf_malloc(sizeof(ABT_xstream) * g_config.n_defrag_xstreams);
+	ABT_pool *service_pools = cf_malloc(sizeof(ABT_pool) * g_config.n_service_xstreams);
+	ABT_pool *defrag_pools = cf_malloc(sizeof(ABT_pool) * g_config.n_defrag_xstreams);
+	ABT_thread *service_threads = cf_malloc(sizeof(ABT_thread) * g_config.n_service_threads);
+	uint32_t n_defrag_threads = 0;
+	ABT_thread *defrag_threads = NULL;
+
+	ABT_init(0, NULL);
+
+	for (uint32_t i = 0; i < g_config.n_service_xstreams; i++) {
+		if (i == 0) {
+			ABT_xstream_self(&service_xstreams[0]);
+		} else {
+			ABT_xstream_create(ABT_SCHED_NULL, &service_xstreams[i]);
+		}
+		ABT_xstream_get_main_pools(service_xstreams[i], 1, &service_pools[i]);
+	}
+
+	for (uint32_t i = 0; i < g_config.n_defrag_xstreams; i++) {
+		ABT_xstream_create(ABT_SCHED_NULL, &defrag_xstreams[i]);
+		ABT_xstream_get_main_pools(defrag_xstreams[i], 1, &defrag_pools[i]);
+	}
+
+	ABT_thread_attr attr;
+	ABT_thread_attr_create(&attr);
+	ABT_thread_attr_set_stacksize(attr, 4 * 1024 * 1024);
+
+	for (uint32_t sid = 0; sid < g_config.n_service_threads; sid++) {
+		uint32_t pool_id = sid % g_config.n_service_xstreams;
+		thread_ctx* ctx = cf_malloc(sizeof(thread_ctx));
+
+		ctx->sid = sid;
+		ABT_thread_create(service_pools[pool_id], run_service_thread, ctx, attr, &service_threads[sid]);
+	}
+
+	if (g_config.n_defrag_xstreams != 0) {
+		for (uint32_t ns_ix = 0; ns_ix < g_config.n_namespaces; ns_ix++) {
+			as_namespace *ns = g_config.namespaces[ns_ix];
+
+			if (ns->storage_type == AS_STORAGE_ENGINE_SSD) {
+				drv_ssds *ssds = (drv_ssds*)ns->storage_private;
+
+				n_defrag_threads += (uint32_t)ssds->n_ssds * g_config.n_defrag_threads_per_device;
+			}
+		}
+
+		defrag_threads = cf_malloc(sizeof(ABT_thread) * n_defrag_threads);
+
+		uint32_t defrag_thread_idx = 0;
+
+		for (uint32_t ns_ix = 0; ns_ix < g_config.n_namespaces; ns_ix++) {
+			as_namespace *ns = g_config.namespaces[ns_ix];
+
+			if (ns->storage_type != AS_STORAGE_ENGINE_SSD) {
+				continue;
+			}
+
+			drv_ssds *ssds = (drv_ssds*)ns->storage_private;
+
+			for (int i = 0; i < ssds->n_ssds; i++) {
+				drv_ssd *ssd = &ssds->ssds[i];
+
+				for (uint32_t j = 0; j < g_config.n_defrag_threads_per_device; j++) {
+					uint32_t pool_id = defrag_thread_idx % g_config.n_defrag_xstreams;
+
+					ABT_thread_create(defrag_pools[pool_id], run_defrag_thread, ssd, attr, &defrag_threads[defrag_thread_idx]);
+					defrag_thread_idx++;
+				}
+			}
+		}
+		cf_assert(defrag_thread_idx == n_defrag_threads, AS_SERVICE, "unexpected");
+	}
+
+	ABT_thread_attr_free(&attr);
+
+	for (uint32_t i = 0; i < g_config.n_service_threads; i++) {
+		ABT_thread_free(&service_threads[i]);
+	}
+
+	for (uint32_t i = 0; i < n_defrag_threads; i++) {
+		ABT_thread_free(&defrag_threads[i]);
+	}
+
+	for (uint32_t i = 1; i < g_config.n_service_xstreams; i++) {
+		ABT_xstream_join(service_xstreams[i]);
+		ABT_xstream_free(&service_xstreams[i]);
+	}
+
+	for (uint32_t i = 0; i < g_config.n_defrag_xstreams; i++) {
+		ABT_xstream_join(defrag_xstreams[i]);
+		ABT_xstream_free(&defrag_xstreams[i]);
+	}
+
+	ABT_finalize();
+	free(service_xstreams);
+	free(defrag_xstreams);
+	free(service_pools);
+	free(defrag_pools);
+	free(service_threads);
+	free(defrag_threads);
+
+	return NULL;
+}
+
+void as_abt_init(void)
+{
+	as_monitor_init(&run_service_monitor);
+	as_monitor_begin(&run_service_monitor);
+
+	cf_thread_create_detached(run_threads, NULL);
+}
+
+static void create_service_threads(void)
+{
+	as_monitor_notify(&run_service_monitor);
+}
+
+static void service_yield(void)
+{
+	record_checkpoint(service_yield_begin);
+	ABT_thread_yield();
+	record_checkpoint(service_yield_end);
+}
+
+static void service_suspend(thread_ctx* ctx)
+{
+	uint32_t first_sid = ctx->sid;
+
+	do {
+		if (ctx->n_busy_polling < g_config.n_service_busy_polling_threshold) {
+			return;
+		}
+		ctx = g_thread_ctxs[(ctx->sid + g_config.n_service_xstreams) % g_config.n_service_threads];
+		if (!ctx) {
+			return;
+		}
+	} while (first_sid != ctx->sid);
+
+	cf_crash(AS_SERVICE, "service_suspend() not implemented");
+}
+
+#else
+
+void as_abt_init(void)
+{
+}
+
+static void create_service_threads(void)
+{
+	for (uint32_t i = 0; i < g_config.n_service_threads; i++) {
+		create_service_thread(i);
+	}
+}
+
+static void service_yield(void)
+{
+}
+
+static void service_suspend(thread_ctx* ctx)
+{
+}
+
+#endif
+
 
 //==========================================================
 // Public API.
@@ -170,9 +386,7 @@ as_service_init(void)
 		cf_mutex_init(&g_thread_locks[i]);
 	}
 
-	for (uint32_t i = 0; i < g_config.n_service_threads; i++) {
-		create_service_thread(i);
-	}
+	create_service_threads();
 }
 
 void
@@ -350,6 +564,8 @@ create_service_thread(uint32_t sid)
 	ctx->lock = &g_thread_locks[sid];
 	cf_poll_create(&ctx->poll);
 	cf_epoll_queue_init(&ctx->trans_q, AS_TRANSACTION_HEAD_SIZE, 64);
+	ctx->sid = sid;
+	ctx->n_busy_polling = 0;
 
 	cf_thread_create_transient(run_service, ctx);
 
@@ -620,7 +836,20 @@ run_service(void* udata)
 
 	while (true) {
 		cf_poll_event events[N_EVENTS];
-		int32_t n_events = cf_poll_wait(poll, events, N_EVENTS, -1);
+#ifdef USE_ARGOBOTS
+		int timeout = 0;
+#else
+		int timeout = -1;
+#endif
+		int32_t n_events = cf_poll_wait(poll, events, N_EVENTS, timeout);
+		if (n_events == 0) {
+			ctx->n_busy_polling++;
+			service_suspend(ctx);
+			service_yield();
+			continue;
+		}
+		ctx->n_busy_polling = 0;
+
 		uint64_t events_ns = cf_getns();
 
 		for (uint32_t i = 0; i < (uint32_t)n_events; i++) {
@@ -700,6 +929,8 @@ run_service(void* udata)
 			// the transaction. We'll rearm at the end of the transaction.
 			start_transaction(fd_h);
 		}
+
+		service_yield();
 	}
 
 	return NULL;

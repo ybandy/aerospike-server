@@ -13,6 +13,7 @@ BASE_HEADERS += batch.h
 BASE_HEADERS += cdt.h
 BASE_HEADERS += cfg.h
 BASE_HEADERS += cfg_info.h
+BASE_HEADERS += checkpoint.h
 BASE_HEADERS += datamodel.h
 BASE_HEADERS += exp.h
 BASE_HEADERS += expop.h
@@ -50,6 +51,7 @@ BASE_SOURCES += bin.c
 BASE_SOURCES += cdt.c
 BASE_SOURCES += cfg.c
 BASE_SOURCES += cfg_info.c
+BASE_SOURCES += checkpoint.c
 BASE_SOURCES += exp.c
 BASE_SOURCES += expop.c
 BASE_SOURCES += health.c
@@ -248,6 +250,11 @@ else
   endif
 endif
 
+ifneq ($(USE_ARGOBOTS),0)
+  INCLUDES += -I$(ARGOBOTS)/src/include
+  INCLUDES += -I$(LIBURING)/src/include
+endif
+
 AS_LIBRARIES += $(LIBRARY_DIR)/libcf.a
 AS_LIBRARIES += $(COMMON)/target/$(PLATFORM)/lib/libaerospike-common.a
 AS_LIBRARIES += $(JEMALLOC)/lib/libjemalloc.a
@@ -284,6 +291,11 @@ ifeq ($(LD_JANSSON),static)
   AS_LIBRARIES += $(JANSSON)/src/.libs/libjansson.a
 else
   LIBRARIES += -L$(JANSSON)/src/.libs -ljansson
+endif
+
+ifneq ($(USE_ARGOBOTS),0)
+  AS_LIBRARIES += $(ARGOBOTS)/src/.libs/libabt.a
+  AS_LIBRARIES += $(LIBURING)/src/liburing.a
 endif
 
 LIBRARIES += $(shell curl-config --libs) -lstdc++

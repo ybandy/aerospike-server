@@ -2,6 +2,7 @@
  * arenax.c
  *
  * Copyright (C) 2012-2023 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -32,11 +33,19 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include "aerospike/as_arch.h"
+#include "../../as/include/base/checkpoint.h"
 #include "citrusleaf/alloc.h"
+#include "citrusleaf/cf_clock.h"
 
 #include "cf_mutex.h"
+#include "cf_thread.h"
 #include "log.h"
 #include "xmem.h"
+
+#ifdef USE_ARGOBOTS
+#include "abt.h"
+#endif
 
 
 //==========================================================
@@ -198,4 +207,53 @@ cf_arenax_is_stage_address(cf_arenax* arena, const void* address)
 	cf_mutex_unlock(&arena->lock);
 
 	return found;
+}
+
+#undef FAKE_LATENCY
+
+static void yield(void)
+{
+#ifdef USE_ARGOBOTS
+	ABT_thread self;
+
+	if (ABT_thread_self(&self) == ABT_SUCCESS) {
+		ABT_thread_yield();
+	} else {
+		cf_thread_yield();
+	}
+#endif
+}
+
+static void
+xlmem_prefetch_and_yield(const cf_arenax* arena, const void* address)
+{
+	const struct pi_xlmem_cfg *cfg = arena->xmem_type_cfg;
+
+	if ((address < cfg->mem) || (cfg->mem + cfg->size_limit <= address)) {
+		cf_crash(CF_ARENAX, "invalid memory access");
+	}
+	if (cfg->latency_ns) {
+#ifdef FAKE_LATENCY
+		uint64_t end = cf_getns() + cfg->latency_ns;
+		yield();
+		while (cf_getns() < end) {
+			as_arch_pause();
+		}
+#else
+		record_checkpoint(prefetch_begin);
+		__builtin_prefetch(address);
+		record_checkpoint(prefetch_end);
+		record_checkpoint(prefetch_yield_begin);
+		yield();
+		record_checkpoint(prefetch_yield_end);
+#endif
+	}
+}
+
+void
+cf_arenax_access(const cf_arenax* arena, const void* address)
+{
+	if (arena->xmem_type == CF_XMEM_TYPE_XLMEM) {
+		xlmem_prefetch_and_yield(arena, address);
+	}
 }

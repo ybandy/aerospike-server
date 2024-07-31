@@ -2,6 +2,7 @@
  * drv_common.c
  *
  * Copyright (C) 2008-2020 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -31,6 +32,12 @@
 #include <stddef.h>
 #include <unistd.h>
 
+#ifdef USE_ARGOBOTS
+#include <liburing.h>
+#include "abt.h"
+#endif
+
+#include "base/checkpoint.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "storage/flat.h"
@@ -70,6 +77,137 @@ drv_apply_opt_meta(as_record* r, as_namespace* ns,
 	// Store or drop the key according to the props we read.
 	as_record_finalize_key(r, ns, opt_meta->key, opt_meta->key_size);
 }
+
+#ifdef USE_ARGOBOTS
+
+static __thread struct io_uring *ring;
+
+static struct io_uring *alloc_ring(void)
+{
+	struct io_uring *ring;
+	int ret;
+
+	ring = cf_malloc(sizeof(*ring));
+	if (!ring) {
+		return NULL;
+	}
+
+	ret = io_uring_queue_init(g_config.n_io_uring_setup_entries, ring,
+			g_config.io_uring_setup_iopoll ? IORING_SETUP_IOPOLL : 0);
+	if (ret) {
+		cf_free(ring);
+		return NULL;
+	}
+
+	return ring;
+}
+
+struct io_data {
+	bool read;
+	int fd;
+	void *buf;
+	size_t size;
+	off_t offset;
+	int error;
+};
+
+static bool
+prw_all(bool read, int fd, void* buf, size_t size, off_t offset)
+{
+	struct io_uring_sqe *sqe;
+	struct io_data data = {
+		.read = read,
+		.fd = fd,
+		.buf = buf,
+		.size = size,
+		.offset = offset,
+	};
+
+	if (!ring) {
+		ring = alloc_ring();
+		cf_assert(ring, AS_DRV_SSD, "unable to allocate io_uring queue");
+	}
+
+	sqe = io_uring_get_sqe(ring);
+	if (!sqe) {
+		cf_crash(AS_DRV_SSD, "no sqe available");
+		return false;
+	}
+
+	if (data.read)
+		io_uring_prep_read(sqe, data.fd, data.buf, data.size, data.offset);
+	else
+		io_uring_prep_write(sqe, data.fd, data.buf, data.size, data.offset);
+
+	io_uring_sqe_set_data(sqe, &data);
+	record_checkpoint(io_submit_begin);
+	io_uring_submit(ring);
+	record_checkpoint(io_submit_end);
+
+	do {
+		struct io_uring_cqe *cqe;
+		int ret;
+
+		ret = io_uring_peek_cqe(ring, &cqe);
+		if (ret == -EAGAIN) {
+			ABT_thread self;
+
+			record_checkpoint(io_yield_begin);
+			if (ABT_thread_self(&self) == ABT_SUCCESS) {
+				ABT_thread_yield();
+			}
+			record_checkpoint(io_yield_end);
+		} else if (ret < 0) {
+			cf_crash(AS_DRV_SSD, "io_uring_peek_cqe returns unexpected error");
+			return false;
+		} else {
+			struct io_data *data = io_uring_cqe_get_data(cqe);
+
+			if (cqe->res < 0) {
+				cf_crash(AS_DRV_SSD, "read/write returns error");
+				data->error = cqe->res;
+				io_uring_cqe_seen(ring, cqe);
+			} else {
+				cf_assert(data->size >= cqe->res, AS_DRV_SSD, "read/write returned too large value");
+				data->buf += cqe->res;
+				data->size -= cqe->res;
+				data->offset += cqe->res;
+				/* Short read/write */
+				if (data->size > 0) {
+					sqe = io_uring_get_sqe(ring);
+					cf_assert(sqe, AS_DRV_SSD, "no sqe available on short read/write");
+
+					if (data->read)
+						io_uring_prep_read(sqe, data->fd, data->buf, data->size, data->offset);
+					else
+						io_uring_prep_write(sqe, data->fd, data->buf, data->size, data->offset);
+
+					io_uring_sqe_set_data(sqe, data);
+					io_uring_submit(ring);
+					io_uring_cqe_seen(ring, cqe);
+				} else {
+					io_uring_cqe_seen(ring, cqe);
+				}
+			}
+		}
+	} while (!data.error && (data.size > 0));
+
+	return data.error ? false : true;
+}
+
+bool
+pread_all(int fd, void* buf, size_t size, off_t offset)
+{
+	return prw_all(true, fd, buf, size, offset);
+}
+
+bool
+pwrite_all(int fd, const void* buf, size_t size, off_t offset)
+{
+	return prw_all(false, fd, (void *)buf, size, offset);
+}
+
+#else
 
 bool
 pread_all(int fd, void* buf, size_t size, off_t offset)
@@ -116,3 +254,5 @@ pwrite_all(int fd, const void* buf, size_t size, off_t offset)
 
 	return true;
 }
+
+#endif

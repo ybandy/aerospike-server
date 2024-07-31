@@ -2,6 +2,7 @@
  * arenax_ce.c
  *
  * Copyright (C) 2014-2023 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -65,7 +66,21 @@ cf_arenax_add_stage(cf_arenax* arena)
 		return CF_ARENAX_ERR_STAGE_CREATE;
 	}
 
-	uint8_t* p_stage = (uint8_t*)cf_try_malloc(arena->stage_size);
+	uint8_t* p_stage;
+
+	if (arena->xmem_type == CF_XMEM_TYPE_XLMEM) {
+		const struct pi_xlmem_cfg *cfg = arena->xmem_type_cfg;
+		uint64_t offset = arena->stage_size * arena->stage_count;
+
+		if (offset + arena->stage_size <= cfg->size_limit) {
+			cf_info(CF_ARENAX, "xlmem usage: %lu/%lu", offset, cfg->size_limit);
+			p_stage = cfg->mem + offset;
+		} else {
+			p_stage = NULL;
+		}
+	} else {
+		p_stage = (uint8_t*)cf_try_malloc(arena->stage_size);
+	}
 
 	if (! p_stage) {
 		cf_ticker_warning(CF_ARENAX,

@@ -2,6 +2,7 @@
  * namespace_ce.c
  *
  * Copyright (C) 2014-2023 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -26,6 +27,9 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <numaif.h>
+#include <sys/mman.h>
+#include <valgrind/memcheck.h>
 
 #include "citrusleaf/alloc.h"
 
@@ -116,6 +120,24 @@ setup_namespace(as_namespace* ns)
 	ns->arena = (cf_arenax*)cf_malloc(sizeof(cf_arenax));
 	ns->tree_shared.arena = ns->arena;
 
+	if (ns->pi_xmem_type == CF_XMEM_TYPE_XLMEM) {
+		struct pi_xlmem_cfg *cfg;
+
+		cfg = cf_malloc(sizeof(*cfg));
+		cfg->size_limit = ns->pi_mounts_size_limit;
+		cfg->latency_ns = ns->pi_xmem_latency_ns;
+		cfg->mem = mmap(NULL, cfg->size_limit, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+		if (cfg->mem == MAP_FAILED) {
+			cf_crash(AS_NAMESPACE, "{%s} can't mmap", ns->name);
+		}
+
+		long ret = mbind(cfg->mem, cfg->size_limit, MPOL_INTERLEAVE, &ns->pi_nodemask, sizeof(ns->pi_nodemask) * 8, 0);
+		if (ret) {
+			cf_crash(AS_NAMESPACE, "{%s} can't mbind", ns->name);
+		}
+		VALGRIND_MAKE_MEM_NOACCESS(cfg->mem, cfg->size_limit);
+		ns->pi_xmem_type_cfg = cfg;
+	}
 	cf_arenax_init(ns->arena, ns->pi_xmem_type, ns->pi_xmem_type_cfg, 0, (uint32_t)sizeof(as_index), 1, ns->index_stage_size);
 
 	ns->si_arena = cf_calloc(1, sizeof(as_sindex_arena));

@@ -2,6 +2,7 @@
  * drv_ssd.c
  *
  * Copyright (C) 2009-2023 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -47,6 +48,10 @@
 #include "citrusleaf/cf_queue.h"
 #include "citrusleaf/cf_random.h"
 
+#ifdef USE_ARGOBOTS
+#include "abt.h"
+#endif
+
 #include "bits.h"
 #include "cf_mutex.h"
 #include "cf_thread.h"
@@ -77,7 +82,7 @@
 //
 
 // TODO - could decrease this as number of drives increases?
-#define MAX_POOL_FDS 512 // power of 2 (rounds up anyway)
+#define MAX_POOL_FDS 8192 // power of 2 (rounds up anyway)
 
 #define WRITE_IN_PLACE 1
 
@@ -859,6 +864,35 @@ Finished:
 }
 
 
+#ifdef USE_ARGOBOTS
+
+int defrag_usleep(useconds_t usec)
+{
+	ABT_thread self;
+
+	if (ABT_thread_self(&self) != ABT_SUCCESS) {
+		return usleep(usec);
+	}
+
+	uint64_t start = cf_getus();
+
+	while (cf_getus() < start + usec) {
+		ABT_thread_yield();
+	}
+
+	return 0;
+}
+
+#else
+
+int defrag_usleep(useconds_t usec)
+{
+	return usleep(usec);
+}
+
+#endif
+
+
 // Thread "run" function to service a device's defrag queue.
 void*
 run_defrag(void *pv_data)
@@ -870,17 +904,24 @@ run_defrag(void *pv_data)
 
 	while (true) {
 		uint32_t q_min = as_load_uint32(&ns->storage_defrag_queue_min);
+		bool busy_polling = false;
 
-		if (q_min == 0) {
+#ifdef USE_ARGOBOTS
+		ABT_thread self;
+		if (ABT_thread_self(&self) == ABT_SUCCESS)
+			busy_polling = true;
+#endif
+		if (!busy_polling && q_min == 0) {
 			cf_queue_pop(ssd->defrag_wblock_q, &wblock_id, CF_QUEUE_FOREVER);
 		}
 		else {
 			if (cf_queue_sz(ssd->defrag_wblock_q) <= q_min) {
-				usleep(1000 * 50);
+				defrag_usleep(1000 * 50);
 				continue;
 			}
 
-			cf_queue_pop(ssd->defrag_wblock_q, &wblock_id, CF_QUEUE_NOWAIT);
+			if (cf_queue_pop(ssd->defrag_wblock_q, &wblock_id, CF_QUEUE_NOWAIT) == CF_QUEUE_EMPTY)
+				continue;
 		}
 
 		ssd_defrag_wblock(ssd, wblock_id, read_buf);
@@ -888,11 +929,11 @@ run_defrag(void *pv_data)
 		uint32_t sleep_us = ns->storage_defrag_sleep;
 
 		if (sleep_us != 0) {
-			usleep(sleep_us);
+			defrag_usleep(sleep_us);
 		}
 
 		while (ns->n_wblocks_to_flush > ns->storage_max_write_q + 128) {
-			usleep(1000);
+			defrag_usleep(1000);
 		}
 	}
 
@@ -900,17 +941,48 @@ run_defrag(void *pv_data)
 }
 
 
-void
-ssd_start_defrag_threads(drv_ssds *ssds)
+static void
+__ssd_start_defrag_threads(drv_ssds *ssds)
 {
 	cf_info(AS_DRV_SSD, "{%s} starting defrag threads", ssds->ns->name);
 
 	for (int i = 0; i < ssds->n_ssds; i++) {
 		drv_ssd *ssd = &ssds->ssds[i];
 
-		cf_thread_create_detached(run_defrag, (void*)ssd);
+		for (int j = 0; j < g_config.n_defrag_threads_per_device; j++) {
+			cf_thread_create_detached(run_defrag, (void*)ssd);
+		}
 	}
 }
+
+
+#ifdef USE_ARGOBOTS
+
+void
+ssd_start_defrag_threads(drv_ssds *ssds)
+{
+	if (g_config.n_defrag_xstreams == 0) {
+		return __ssd_start_defrag_threads(ssds);
+	}
+
+	cf_info(AS_DRV_SSD, "{%s} starting defrag threads", ssds->ns->name);
+
+	for (int i = 0; i < ssds->n_ssds; i++) {
+		drv_ssd *ssd = &ssds->ssds[i];
+
+		as_monitor_notify(&ssd->run_defrag_monitor);
+	}
+}
+
+#else
+
+void
+ssd_start_defrag_threads(drv_ssds *ssds)
+{
+	return __ssd_start_defrag_threads(ssds);
+}
+
+#endif
 
 
 //------------------------------------------------
@@ -3852,6 +3924,10 @@ as_storage_init_ssd(as_namespace *ns)
 			ssd->hist_shadow_write = histogram_create(histname, HIST_MILLISECONDS);
 		}
 
+#ifdef USE_ARGOBOTS
+		as_monitor_init(&ssd->run_defrag_monitor);
+		as_monitor_begin(&ssd->run_defrag_monitor);
+#endif
 		ssd_init_commit(ssd);
 	}
 

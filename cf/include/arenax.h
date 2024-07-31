@@ -2,6 +2,7 @@
  * arenax.h
  *
  * Copyright (C) 2012-2020 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -144,6 +145,7 @@ cf_arenax_handle cf_arenax_alloc(cf_arenax* arena, cf_arenax_puddle* puddle);
 void cf_arenax_free(cf_arenax* arena, cf_arenax_handle h, cf_arenax_puddle* puddle);
 
 bool cf_arenax_is_stage_address(cf_arenax* arena, const void* address);
+void cf_arenax_access(const cf_arenax* arena, const void* address);
 
 bool cf_arenax_want_prefetch(cf_arenax* arena);
 void cf_arenax_reclaim(cf_arenax* arena, cf_arenax_puddle* puddles, uint32_t n_puddles);
@@ -152,8 +154,10 @@ void cf_arenax_reclaim(cf_arenax* arena, cf_arenax_puddle* puddles, uint32_t n_p
 static inline void*
 cf_arenax_resolve(const cf_arenax* arena, cf_arenax_handle h)
 {
-	return arena->stages[h >> ELEMENT_ID_NUM_BITS] +
+	void *address = arena->stages[h >> ELEMENT_ID_NUM_BITS] +
 			((h & ELEMENT_ID_MASK) * arena->element_size);
+	cf_arenax_access(arena, address);
+	return address;
 }
 
 
@@ -180,3 +184,9 @@ cf_arenax_err cf_arenax_add_stage(cf_arenax* arena);
 
 cf_arenax_handle cf_arenax_alloc_chunked(cf_arenax* arena, cf_arenax_puddle* puddle);
 void cf_arenax_free_chunked(cf_arenax* arena, cf_arenax_handle h, cf_arenax_puddle* puddle);
+
+struct pi_xlmem_cfg {
+	uint64_t size_limit;
+	void *mem;
+	uint32_t latency_ns;
+};

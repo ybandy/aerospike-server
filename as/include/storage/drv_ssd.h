@@ -2,6 +2,7 @@
  * drv_ssd.h
  *
  * Copyright (C) 2014-2020 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -46,6 +47,10 @@
 #include "storage/drv_common.h"
 #include "storage/flat.h"
 #include "storage/storage.h"
+
+#ifdef USE_ARGOBOTS
+#include "aerospike/as_monitor.h"
+#endif
 
 
 //==========================================================
@@ -200,6 +205,10 @@ typedef struct drv_ssd_s {
 	histogram		*hist_large_block_read;
 	histogram		*hist_write;
 	histogram		*hist_shadow_write;
+
+#ifdef USE_ARGOBOTS
+	as_monitor		run_defrag_monitor;
+#endif
 } drv_ssd;
 
 
@@ -246,6 +255,7 @@ void ssd_load_wblock_queues(drv_ssds *ssds);
 void ssd_start_maintenance_threads(drv_ssds *ssds);
 void ssd_start_write_threads(drv_ssds *ssds);
 void ssd_start_defrag_threads(drv_ssds *ssds);
+void* run_defrag(void *pv_data);
 void apply_opt_meta(struct as_index_s *r, struct as_namespace_s *ns, const struct as_flat_opt_meta_s *opt_meta);
 
 // Tomb raider.

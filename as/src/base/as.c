@@ -2,6 +2,7 @@
  * as.c
  *
  * Copyright (C) 2008-2023 Aerospike, Inc.
+ * Copyright (C) 2024 Kioxia Corporation.
  *
  * Portions may be licensed to Aerospike, Inc. under one or more contributor
  * license agreements.
@@ -51,6 +52,7 @@
 
 #include "base/batch.h"
 #include "base/cfg.h"
+#include "base/checkpoint.h"
 #include "base/datamodel.h"
 #include "base/health.h"
 #include "base/index.h"
@@ -332,6 +334,7 @@ as_run(int argc, char **argv)
 	// starting worker threads, etc. (But no communication with other server
 	// nodes or clients yet.)
 
+	checkpoint_trace_init();
 	as_json_init();				// Jansson JSON API used by System Metadata
 	as_index_tree_gc_init();	// thread to purge dropped index trees
 	as_nsup_init();				// load previous evict-void-time(s)
@@ -373,6 +376,8 @@ as_run(int argc, char **argv)
 	// Populate data-not-in-memory namespaces' secondary indexes.
 	as_sindex_load();
 	// ... This could block for a while ....................
+
+	as_abt_init();
 
 	// The defrag subsystem starts operating here. Wait for enough available
 	// storage.
